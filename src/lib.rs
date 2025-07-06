@@ -1,6 +1,8 @@
 #![deny(unused_must_use)]
 // Don't allow dbg! prints in release.
 #![cfg_attr(not(debug_assertions), deny(clippy::dbg_macro))]
+// Suppress warnings from num_derive macros when using nightly compiler
+#![allow(non_local_definitions)]
 
 #[macro_use]
 extern crate num_derive;
