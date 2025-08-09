@@ -25,7 +25,7 @@ pub const ZERO_HEADER: &[u8; 4] = b"\x00\x00\x00\x00";
 pub const BAAD_HEADER: &[u8; 4] = b"BAAD";
 pub const FILE_HEADER: &[u8; 4] = b"FILE";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct MftEntry {
     pub header: EntryHeader,
     pub data: Vec<u8>,
@@ -51,7 +51,7 @@ impl ser::Serialize for MftEntry {
 
 /// <https://docs.microsoft.com/en-us/windows/desktop/devnotes/file-record-segment-header>
 /// The MFT entry can be filled entirely with 0-byte values.
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, Eq, PartialEq, Hash)]
 pub struct EntryHeader {
     /// MULTI_SECTOR_HEADER
     /// The signature. This value is a convenience to the user.
@@ -244,7 +244,7 @@ impl MftEntry {
     /// even if the device has more (or less) than 512 bytes per sector.
     /// The returned result is true if all fixup blocks had the fixup array value, or
     /// false if a block's fixup value did not match the array's value.
-    fn apply_fixups(header: &EntryHeader, buffer: &mut [u8]) -> Result<bool> {
+    pub fn apply_fixups(header: &EntryHeader, buffer: &mut [u8]) -> Result<bool> {
         let mut valid_fixup = true;
         let number_of_fixups = u32::from(header.usa_size - 1);
         trace!("Number of fixups: {}", number_of_fixups);
