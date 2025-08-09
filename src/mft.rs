@@ -14,7 +14,7 @@ pub struct MftParser<T: Read + Seek> {
     data: T,
     /// Entry size is present in the volume header, but this is not available to us.
     /// Instead this will be guessed by the entry size of the first entry.
-    entry_size: u32,
+    pub entry_size: u32,
     size: u64,
     entries_cache: LruCache<u64, PathBuf>,
 }
