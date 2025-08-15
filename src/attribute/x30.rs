@@ -15,7 +15,7 @@ use serde::Serialize;
 use winstructs::ntfs::mft_reference::MftReference;
 use winstructs::timestamp::WinTimestamp;
 
-#[derive(FromPrimitive, Serialize, Clone, Debug, PartialOrd, PartialEq)]
+#[derive(FromPrimitive, Serialize, Clone, Debug, PartialOrd, PartialEq, Copy)]
 #[repr(u8)]
 pub enum FileNamespace {
     POSIX = 0,

@@ -19,6 +19,9 @@ pub mod csv;
 pub mod entry;
 pub mod err;
 pub mod mft;
+pub mod fast_fixup; // fast slice-based fixup & helpers
+pub mod fast_entry; // fast filename scanning
+pub mod path_resolve; // basic path resolution
 
 pub(crate) mod macros;
 pub(crate) mod utils;
