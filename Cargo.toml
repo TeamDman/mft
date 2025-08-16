@@ -29,14 +29,14 @@ rayon = { version = "1.10", optional = true }
 
 # `mft_dump` dependencies
 clap = { version = "4", optional = true }
-anyhow = { version = "1.0", optional = true }
 simplelog = { version = "0.12", optional = true }
 dialoguer = { version = "0.10", optional = true }
 indoc = { version = "2.0", optional = true }
+eyre = {version = "0.6.12", optional = true }
 
 [features]
-default = ["mft_dump"]
-mft_dump = ["anyhow", "simplelog", "dialoguer", "indoc", "clap"]
+default = ["mft_dump", "parallel"]
+mft_dump = ["eyre", "simplelog", "dialoguer", "indoc", "clap"]
 parallel = ["rayon"]
 
 [dependencies.chrono]

@@ -9,7 +9,7 @@ use mft::MftEntry;
 use dialoguer::Confirm;
 use mft::csv::FlatMftEntryWithName;
 
-use anyhow::{anyhow, Context, Error, Result};
+use eyre::{eyre, Context, Error, Result};
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -57,7 +57,7 @@ impl FromStr for Ranges {
             if x.contains('-') {
                 let range: Vec<&str> = x.split('-').collect();
                 if range.len() != 2 {
-                    return Err(anyhow!(
+                    return Err(eyre!(
                         "Failed to parse ranges: Range should contain exactly one `-`, found {}",
                         x
                     ));
@@ -156,7 +156,7 @@ impl MftDump {
             match Self::create_output_file(path, !matches.get_flag("no-confirm-overwrite")) {
                 Ok(f) => Some(Box::new(f)),
                 Err(e) => {
-                    return Err(anyhow!(
+                    return Err(eyre!(
                         "An error occurred while creating output file at `{}` - `{}`",
                         path,
                         e
@@ -206,7 +206,7 @@ impl MftDump {
 
         if p.exists() {
             if !p.is_dir() {
-                return Err(anyhow!(
+                return Err(eyre!(
                     "There is a file at {}, refusing to overwrite",
                     p.display()
                 ));
@@ -224,7 +224,7 @@ impl MftDump {
         let p = path.as_ref();
 
         if p.is_dir() {
-            return Err(anyhow!(
+            return Err(eyre!(
                 "There is a directory at {}, refusing to overwrite",
                 p.display()
             ));
@@ -241,8 +241,8 @@ impl MftDump {
                     .interact()
                 {
                     Ok(true) => Ok(File::create(p)?),
-                    Ok(false) => Err(anyhow!("Cancelled")),
-                    Err(e) => Err(anyhow!(
+                    Ok(false) => Err(eyre!("Cancelled")),
+                    Err(e) => Err(eyre!(
                         "Failed to write confirmation prompt to term caused by\n{}",
                         e
                     )),
@@ -263,7 +263,7 @@ impl MftDump {
                         Ok(File::create(p)?)
                     }
                 }
-                None => Err(anyhow!("Output file cannot be root.")),
+                None => Err(eyre!("Output file cannot be root.")),
             }
         }
     }
@@ -348,7 +348,7 @@ impl MftDump {
                         );
 
                         if PathBuf::from(&data_stream_path).exists() {
-                            return Err(anyhow!(
+                            return Err(eyre!(
                                 "Tried to override an existing stream {} already exists!\
                                  This is a bug, please report to github!",
                                 data_stream_path

@@ -4,6 +4,8 @@
 use std::borrow::Cow;
 use std::path::{PathBuf};
 
+use eyre::bail;
+
 use crate::fast_entry::FileNameRef;
 
 /// Namespace priority for canonical path selection (higher earlier).
@@ -31,7 +33,7 @@ fn decode_name(units: &[u16]) -> Cow<'_, str> {
 }
 
 /// Resolve paths (simple, single parent path per entry, ignoring multiple hardlink parents for now).
-pub fn resolve_paths_simple<'a>(file_names: &'a [FileNameRef<'a>], per_entry: &[Vec<usize>]) -> Vec<Option<PathBuf>> {
+pub fn resolve_paths_simple<'a>(file_names: &'a [FileNameRef<'a>], per_entry: &[Vec<usize>]) -> eyre::Result<Vec<Option<PathBuf>>> {
     let entry_count = per_entry.len();
     let mut results: Vec<Option<PathBuf>> = vec![None; entry_count];
 
@@ -41,7 +43,11 @@ pub fn resolve_paths_simple<'a>(file_names: &'a [FileNameRef<'a>], per_entry: &[
     // Iterate sequentially; if parent unresolved we will revisit in second pass (inefficient but OK baseline)
     let mut changed = true;
     let mut passes = 0;
-    while changed && passes < 10 { // emergency cap
+    while changed {
+        // emergency cap
+        if passes > 25 {
+            bail!("Warning: path resolution exceeded {} passes, stopping here.", passes);
+        }
         changed = false;
         passes += 1;
         for entry_id in 0..entry_count {
@@ -64,5 +70,5 @@ pub fn resolve_paths_simple<'a>(file_names: &'a [FileNameRef<'a>], per_entry: &[
         }
     }
 
-    results
+    Ok(results)
 }
