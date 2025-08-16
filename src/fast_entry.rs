@@ -16,6 +16,61 @@ pub struct FileNameRef<'a> {
     pub name_utf16: &'a [u16],
 }
 
+/// Collection of FILE_NAME attributes extracted from MFT data.
+/// 
+/// This structure provides organized access to all filename references found
+/// in an MFT, with efficient lookup by entry ID.
+#[derive(Clone, Debug)]
+pub struct FileNameCollection<'a> {
+    /// All FILE_NAME references found across all entries
+    pub all_filenames: Vec<FileNameRef<'a>>,
+    /// Index mapping where `per_entry[entry_id]` contains indices 
+    /// into `all_filenames` for all filenames belonging to that entry
+    pub per_entry_indices: Vec<Vec<usize>>,
+}
+
+impl<'a> FileNameCollection<'a> {
+    /// Get all filename references for a specific entry ID.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `entry_id` - The MFT entry ID to look up
+    /// 
+    /// # Returns
+    /// 
+    /// An iterator over all `FileNameRef` instances for the given entry,
+    /// or an empty iterator if the entry ID is not found.
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// # use mft::fast_entry::{par_collect_filenames, FileNameCollection};
+    /// # let data = &[0u8; 2048]; // Mock MFT data
+    /// let collection = par_collect_filenames(data, 1024);
+    /// 
+    /// for filename in collection.filenames_for_entry(5) {
+    ///     println!("Entry 5 filename: {:?}", filename);
+    /// }
+    /// ```
+    pub fn filenames_for_entry(&self, entry_id: u32) -> impl Iterator<Item = &FileNameRef<'a>> {
+        self.per_entry_indices
+            .get(entry_id as usize)
+            .map(|indices| indices.iter().filter_map(|&idx| self.all_filenames.get(idx)))
+            .into_iter()
+            .flatten()
+    }
+    
+    /// Get the total number of filename references collected.
+    pub fn x30_count(&self) -> usize {
+        self.all_filenames.len()
+    }
+    
+    /// Get the number of entries that have filename attributes.
+    pub fn entry_count(&self) -> usize {
+        self.per_entry_indices.len()
+    }
+}
+
 #[inline]
 fn read_u16(bytes: &[u8], off: usize) -> Option<u16> {
     bytes.get(off..off+2).map(|b| u16::from_le_bytes([b[0], b[1]]))
@@ -76,10 +131,52 @@ pub fn for_each_filename<'a, F: FnMut(FileNameRef<'a>)>(entry_bytes: &'a [u8], e
     count
 }
 
+/// Parallel collection of all FILE_NAME attributes from MFT data.
+/// 
+/// This function processes MFT entries in parallel using Rayon to extract all FILE_NAME
+/// attributes efficiently. It's particularly useful for large MFT files where sequential
+/// processing would be too slow.
+/// 
+/// # Arguments
+/// 
+/// * `mft_file` - Raw MFT data bytes (must be properly fixed up with `fast_fixup` first)
+/// * `entry_size` - Size of each MFT entry in bytes (typically 1024 bytes)
+/// 
+/// # Returns
+/// 
+/// A `FileNameCollection` containing all FILE_NAME references with efficient lookup by entry ID.
+/// 
+/// # Requirements
+/// 
+/// * Requires the `parallel` feature to be enabled
+/// * Input data must be evenly divisible by `entry_size`
+/// * MFT data must have fixups already applied (use `fast_fixup` module first)
+/// 
+/// # Example
+/// 
+/// ```rust
+/// # use mft::fast_entry::par_collect_filenames;
+/// # let data = &[0u8; 2048]; // Mock MFT data
+/// let entry_size = 1024;
+/// let collection = par_collect_filenames(data, entry_size);
+/// 
+/// // Access all filenames for entry ID 5
+/// for filename in collection.filenames_for_entry(5) {
+///     println!("Entry 5 has filename: {:?}", filename);
+/// }
+/// 
+/// println!("Total filenames found: {}", collection.total_count());
+/// ```
+/// 
+/// # Performance
+/// 
+/// This function uses Rayon's parallel iterator to process entries concurrently,
+/// making it significantly faster than sequential processing for large MFT files.
+/// The trade-off is higher memory usage and complexity in the returned data structure.
 #[cfg(feature = "parallel")]
-pub fn par_collect_filenames<'a>(data: &'a [u8], entry_size: usize) -> (Vec<FileNameRef<'a>>, Vec<Vec<usize>>) {
+pub fn par_collect_filenames<'a>(mft_file: &'a [u8], entry_size: usize) -> FileNameCollection<'a> {
     use rayon::prelude::*;
-    let entries = data.par_chunks_exact(entry_size).enumerate();
+    let entries = mft_file.par_chunks_exact(entry_size).enumerate();
     let per_thread: Vec<(Vec<FileNameRef<'a>>, Vec<(u32, usize)>)> = entries.map(|(idx, entry)| {
         let mut list = Vec::new();
         let mut pairs = Vec::new();
@@ -95,7 +192,7 @@ pub fn par_collect_filenames<'a>(data: &'a [u8], entry_size: usize) -> (Vec<File
     let mut file_names = Vec::with_capacity(total);
     for (v, _) in &per_thread { file_names.extend_from_slice(v); }
 
-    let entry_count = data.len() / entry_size;
+    let entry_count = mft_file.len() / entry_size;
     let mut per_entry: Vec<Vec<usize>> = vec![Vec::new(); entry_count];
     let mut base = 0usize;
     for (v, pairs) in per_thread {
@@ -105,5 +202,8 @@ pub fn par_collect_filenames<'a>(data: &'a [u8], entry_size: usize) -> (Vec<File
         }
         base += v.len();
     }
-    (file_names, per_entry)
+    FileNameCollection {
+        all_filenames: file_names,
+        per_entry_indices: per_entry,
+    }
 }
