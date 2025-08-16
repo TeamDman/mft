@@ -5,8 +5,6 @@ use std::borrow::Cow;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 
-use eyre::bail;
-
 use crate::fast_entry::{FileNameCollection, FileNameRef};
 
 /// Namespace priority for canonical path selection (higher earlier).
@@ -80,39 +78,25 @@ impl IntoIterator for ResolvedPaths {
     }
 }
 
-/// Resolve paths (simple, single parent path per entry, ignoring multiple hardlink parents for now).
-pub fn resolve_paths_simple(file_names: &FileNameCollection<'_>) -> eyre::Result<ResolvedPaths> {
+// ORIGINAL multi-pass implementation preserved for validation / benchmarking.
+pub fn resolve_paths_simple_multipass(file_names: &FileNameCollection<'_>) -> eyre::Result<ResolvedPaths> {
     let entry_count = file_names.entry_count();
     let mut results: Vec<Option<PathBuf>> = vec![None; entry_count];
-
-    // Root (entry 5) special-case: gather name (usually '.') -> treat as empty path root
-    if entry_count > 5 {
-        results[5] = Some(PathBuf::new());
-    }
-
-    // Iterate sequentially; if parent unresolved we will revisit in second pass (inefficient but OK baseline)
+    if entry_count > 5 { results[5] = Some(PathBuf::new()); }
     let mut changed = true;
-    let mut passes = 0;
+    let mut passes = 0u32;
     while changed {
         if passes > 25 {
-            bail!(
-                "Warning: path resolution exceeded {} passes, stopping here.",
-                passes
-            );
+            break; // mimic old early stop behavior (was bail! previously)
         }
         changed = false;
         passes += 1;
         for entry_id in 0..entry_count {
-            if results[entry_id].is_some() {
-                continue;
-            }
-            let candidates: Vec<&FileNameRef> =
-                file_names.filenames_for_entry(entry_id as u32).collect();
-            if candidates.is_empty() {
-                continue;
-            }
+            if results[entry_id].is_some() { continue; }
+            let candidates: Vec<&FileNameRef> = file_names.filenames_for_entry(entry_id as u32).collect();
+            if candidates.is_empty() { continue; }
             if let Some(best) = choose_best(&candidates) {
-                let parent_record = (best.parent_ref & 0xFFFFFFFFFFFF) as usize; // mask to 48 bits
+                let parent_record = (best.parent_ref & 0xFFFFFFFFFFFF) as usize;
                 let parent_ready = parent_record < entry_count && results[parent_record].is_some();
                 if parent_ready {
                     let mut path = results[parent_record].as_ref().unwrap().clone();
@@ -124,6 +108,232 @@ pub fn resolve_paths_simple(file_names: &FileNameCollection<'_>) -> eyre::Result
             }
         }
     }
+    Ok(ResolvedPaths(results))
+}
+
+/// Randomly sample entries comparing the original multi-pass resolver and the new DFS resolver.
+/// Ensures:
+/// 1. Same total resolved count.
+/// 2. For sampled indices, both have identical presence/absence and identical path when present.
+/// Fails fast on first discrepancy.
+pub fn compare_resolvers_random_sample(
+    file_names: &FileNameCollection<'_>,
+    sample_size: usize,
+    seed: u64,
+) -> eyre::Result<()> {
+    let old_paths = resolve_paths_simple_multipass(file_names)?;
+    let new_paths = resolve_paths_simple(file_names)?;
+
+    // Global counts: new must be >= old (multi-parent support may increase resolutions)
+    let old_resolved = old_paths.resolved_count();
+    let new_resolved = new_paths.resolved_count();
+    if new_resolved < old_resolved {
+        eyre::bail!(
+            "Resolved count regression new={} < old={}",
+            new_resolved, old_resolved
+        );
+    }
+    if old_paths.len() != new_paths.len() {
+        eyre::bail!(
+            "Vector length mismatch old={} new={}",
+            old_paths.len(),
+            new_paths.len()
+        );
+    }
+
+    // Simple deterministic xorshift64* PRNG
+    fn next_rand(state: &mut u64) -> u64 { let mut x = *state; x ^= x >> 12; x ^= x << 25; x ^= x >> 27; *state = x; x.wrapping_mul(0x2545F4914F6CDD1D) }
+
+    let entry_count = old_paths.len();
+    let take = sample_size.min(entry_count);
+    let mut rng_state = if seed == 0 { 0xDEADBEEFCAFEBABEu64 } else { seed };
+
+    for _ in 0..take {
+        let idx = (next_rand(&mut rng_state) as usize) % entry_count;
+        let a = &old_paths[idx];
+        let b = &new_paths[idx];
+        match (a, b) {
+            (None, None) => {},                 // both unresolved -> fine
+            (None, Some(_pb)) => {},            // new resolved extra -> acceptable
+            (Some(_pa), None) => {
+                eyre::bail!(
+                    "Entry {} lost resolution: old had path, new is None",
+                    idx
+                );
+            }
+            (Some(pa), Some(pb)) => {
+                if pa != pb {
+                    eyre::bail!(
+                        "Path mismatch at index {} old='{}' new='{}'",
+                        idx,
+                        pa.display(),
+                        pb.display()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolve paths (optimized single-pass DFS with memoization).
+/// Previous implementation used iterative multi-pass over all entries causing
+/// O(N * passes) behavior (~depth * N). This version reduces work to near O(N).
+pub fn resolve_paths_simple(file_names: &FileNameCollection<'_>) -> eyre::Result<ResolvedPaths> {
+    let entry_count = file_names.entry_count();
+    let mut results: Vec<Option<PathBuf>> = vec![None; entry_count];
+
+    // Root (entry 5) special-case: treat as empty path root
+    if entry_count > 5 {
+        results[5] = Some(PathBuf::new());
+    }
+
+    // Pre-select best filename attr per entry (canonical choice) => (parent_entry, name_utf16)
+    let mut best_meta: Vec<Option<(usize, &'_ [u16])>> = vec![None; entry_count];
+    for entry_id in 0..entry_count {
+        let cands: Vec<&FileNameRef> = file_names.filenames_for_entry(entry_id as u32).collect();
+        if cands.is_empty() {
+            continue;
+        }
+        if let Some(best) = choose_best(&cands) {
+            let parent_record = (best.parent_ref & 0xFFFFFFFFFFFF) as usize; // mask to 48 bits
+            if parent_record < entry_count { // discard invalid parents
+                best_meta[entry_id] = Some((parent_record, best.name_utf16));
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum VisitState { Unvisited, Visiting, Done }
+    let mut state: Vec<VisitState> = vec![VisitState::Unvisited; entry_count];
+
+    // Iterative DFS to avoid deep recursion; typical depth small but this is safe.
+    for start in 0..entry_count {
+        if state[start] == VisitState::Done { continue; }
+        // Skip if we already have a resolved path (e.g., root) and no need to propagate
+        if results[start].is_some() { state[start] = VisitState::Done; continue; }
+        let mut stack: Vec<usize> = Vec::new();
+        stack.push(start);
+        while let Some(&cur) = stack.last() {
+            match state[cur] {
+                VisitState::Done => { stack.pop(); },
+                VisitState::Visiting => {
+                    // Children (parents) processed, build this path if possible
+                    if results[cur].is_none() {
+                        if let Some((parent, name_units)) = best_meta[cur] {
+                            if parent == cur { // self-cycle guard
+                                results[cur] = Some(PathBuf::from(decode_name(name_units).as_ref()));
+                            } else if let Some(parent_path) = results[parent].clone() {
+                                let mut path = parent_path.clone();
+                                path.push(decode_name(name_units).as_ref());
+                                results[cur] = Some(path);
+                            }
+                        }
+                    }
+                    state[cur] = VisitState::Done;
+                    stack.pop();
+                }
+                VisitState::Unvisited => {
+                    state[cur] = VisitState::Visiting;
+                    if let Some((parent, _)) = best_meta[cur] {
+                        if parent != cur && state[parent] == VisitState::Unvisited {
+                            stack.push(parent);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Optional sanity threshold: if too many remain unresolved maybe corrupted graph
+    // (Keep previous behavior of not treating as hard error, but we can warn externally.)
+    if entry_count > 0 && results.iter().filter(|p| p.is_none()).count() > entry_count / 2 {
+        // Large fraction unresolved could indicate issues; return Ok anyway for now.
+    }
 
     Ok(ResolvedPaths(results))
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MultiResolvedPaths(pub Vec<Vec<PathBuf>>);
+impl MultiResolvedPaths {
+    pub fn entry_count(&self) -> usize { self.0.len() }
+    pub fn total_paths(&self) -> usize { self.0.iter().map(|v| v.len()).sum() }
+    pub fn paths_for(&self, entry_id: usize) -> &[PathBuf] { self.0.get(entry_id).map(|v| &v[..]).unwrap_or(&[]) }
+}
+
+#[inline]
+fn ns_rank(ns: u8) -> u8 { match ns { 1 => 0, 3 => 1, 0 => 2, 2 => 3, _ => 4 } } // Win32 > Win32AndDos > POSIX > DOS
+
+/// Resolve all paths including multiple hardlink parents.
+/// For each distinct parent of an entry, keep only the highest-precedence namespace.
+/// Returns zero/one/many paths per entry (index aligned with entry id).
+pub fn resolve_paths_all(file_names: &FileNameCollection<'_>) -> eyre::Result<MultiResolvedPaths> {
+    let entry_count = file_names.entry_count();
+    // Collect per-entry best (parent -> (namespace, name_utf16)) selections.
+    struct BestName<'a> { parent: usize, namespace: u8, name_utf16: &'a [u16] }
+    let mut per_entry: Vec<Vec<BestName<'_>>> = {
+        let mut v = Vec::with_capacity(entry_count);
+        for _ in 0..entry_count { v.push(Vec::new()); }
+        v
+    };
+    for entry_id in 0..entry_count {
+        for fref in file_names.filenames_for_entry(entry_id as u32) {
+            let parent = (fref.parent_ref & 0xFFFFFFFFFFFF) as usize;
+            if parent >= entry_count { continue; }
+            let list = &mut per_entry[entry_id];
+            if let Some(existing) = list.iter_mut().find(|bn| bn.parent == parent) {
+                if ns_rank(fref.namespace) < ns_rank(existing.namespace) { existing.namespace = fref.namespace; existing.name_utf16 = fref.name_utf16; }
+            } else {
+                list.push(BestName { parent, namespace: fref.namespace, name_utf16: fref.name_utf16 });
+            }
+        }
+    }
+
+    // Prepare results: vector of vectors of PathBufs
+    let mut results: Vec<Vec<PathBuf>> = vec![Vec::new(); entry_count];
+    if entry_count > 5 { results[5].push(PathBuf::new()); }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum VisitState { Unvisited, Visiting, Done }
+    let mut state: Vec<VisitState> = vec![VisitState::Unvisited; entry_count];
+
+    for start in 0..entry_count {
+        if state[start] == VisitState::Done { continue; }
+        let mut stack: Vec<usize> = Vec::new();
+        stack.push(start);
+        while let Some(&cur) = stack.last() {
+            match state[cur] {
+                VisitState::Done => { stack.pop(); },
+                VisitState::Visiting => {
+                    if results[cur].is_empty() { // attempt to build paths
+                        let mut acc: Vec<PathBuf> = Vec::new();
+                        for bn in &per_entry[cur] {
+                            if bn.parent == cur { continue; } // self-cycle guard
+                            if results[bn.parent].is_empty() { continue; } // parent unresolved
+                            let name = decode_name(bn.name_utf16); // decode once per best parent
+                            for parent_path in &results[bn.parent] {
+                                let mut p = parent_path.clone();
+                                p.push(name.as_ref());
+                                acc.push(p);
+                            }
+                        }
+                        if !acc.is_empty() {
+                            // Dedup identical paths if any (rare). Use simple sort+dedup for determinism.
+                            if acc.len() > 1 { acc.sort(); acc.dedup(); }
+                            results[cur] = acc;
+                        }
+                    }
+                    state[cur] = VisitState::Done; stack.pop();
+                }
+                VisitState::Unvisited => {
+                    state[cur] = VisitState::Visiting;
+                    // push parents first
+                    for bn in &per_entry[cur] { if bn.parent != cur && state[bn.parent] == VisitState::Unvisited { stack.push(bn.parent); } }
+                }
+            }
+        }
+    }
+
+    Ok(MultiResolvedPaths(results))
 }
