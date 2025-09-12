@@ -258,9 +258,11 @@ pub fn resolve_paths_simple(file_names: &FileNameCollection<'_>) -> eyre::Result
     Ok(ResolvedPaths(results))
 }
 
+/// A mapping from MFT entry ID to zero/one/many resolved paths.
+/// Because an entry can have multiple x30 attributes, one entry may have more than one full path associated with it.
 #[derive(Debug, Default, Clone)]
-pub struct MultiResolvedPaths(pub Vec<Vec<PathBuf>>);
-impl MultiResolvedPaths {
+pub struct MftEntryPathCollection(pub Vec<Vec<PathBuf>>);
+impl MftEntryPathCollection {
     pub fn entry_count(&self) -> usize { self.0.len() }
     pub fn total_paths(&self) -> usize { self.0.iter().map(|v| v.len()).sum() }
     pub fn paths_for(&self, entry_id: usize) -> &[PathBuf] { self.0.get(entry_id).map(|v| &v[..]).unwrap_or(&[]) }
@@ -272,7 +274,7 @@ fn ns_rank(ns: u8) -> u8 { match ns { 1 => 0, 3 => 1, 0 => 2, 2 => 3, _ => 4 } }
 /// Resolve all paths including multiple hardlink parents.
 /// For each distinct parent of an entry, keep only the highest-precedence namespace.
 /// Returns zero/one/many paths per entry (index aligned with entry id).
-pub fn resolve_paths_all(file_names: &FileNameCollection<'_>) -> eyre::Result<MultiResolvedPaths> {
+pub fn resolve_paths_all(file_names: &FileNameCollection<'_>) -> eyre::Result<MftEntryPathCollection> {
     let entry_count = file_names.entry_count();
     // Collect per-entry best (parent -> (namespace, name_utf16)) selections.
     struct BestName<'a> { parent: usize, namespace: u8, name_utf16: &'a [u16] }
@@ -339,11 +341,11 @@ pub fn resolve_paths_all(file_names: &FileNameCollection<'_>) -> eyre::Result<Mu
         }
     }
 
-    Ok(MultiResolvedPaths(results))
+    Ok(MftEntryPathCollection(results))
 }
 
 #[cfg(feature = "parallel")]
-pub fn resolve_paths_all_parallel(file_names: &FileNameCollection<'_>) -> eyre::Result<MultiResolvedPaths> {
+pub fn resolve_paths_all_parallel(file_names: &FileNameCollection<'_>) -> eyre::Result<MftEntryPathCollection> {
     use rayon::prelude::*;
     let entry_count = file_names.entry_count();
 
@@ -424,5 +426,5 @@ pub fn resolve_paths_all_parallel(file_names: &FileNameCollection<'_>) -> eyre::
         for (id, acc) in layer_outputs { if !acc.is_empty() { results[id] = acc; } }
     }
 
-    Ok(MultiResolvedPaths(results))
+    Ok(MftEntryPathCollection(results))
 }
